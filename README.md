@@ -191,3 +191,68 @@ xxd seng21213-os.img | grep -c aa55  # Verify boot signature
 ---
 
 *Happy hacking! Remember: every commercial OS started exactly like this.*
+
+---
+
+## Stage 1 — Process Table & Round-Robin Scheduler (Lecture 9)
+
+**Status:** ✅ Complete — tagged `v0.2-stage1`
+
+### What was implemented
+
+- **`kernel/idt.h` / `kernel/idt.c`** — Interrupt Descriptor Table setup and 8259 PIC
+  remapping (IRQ0–15 moved to interrupt vectors 32–47 to avoid clashing with CPU
+  exception vectors). Required infrastructure not present in the Stage 0 starter kit.
+- **`kernel/isr_stub.asm`** — Assembly entry point for the IRQ0 (timer) interrupt.
+- **`kernel/irq.h` / `kernel/irq.c`** — Programs the 8253/8254 PIT to fire IRQ0 at
+  100 Hz; the handler calls `schedule()` on every tick.
+- **`kernel/process.h` / `kernel/process.c`** — `pcb_t` process control block
+  (pid, state, esp, eip, priority, name) and `create_process()`, which allocates a
+  4 KB stack per process and fabricates an initial stack frame so the first
+  context switch lands directly on the process's entry function.
+- **`kernel/scheduler.h` / `kernel/scheduler.c`** — Round-robin scheduler.
+  `scheduler_start()` performs the initial handoff from `kernel_main` into the
+  first process; `schedule()` performs subsequent preemptive switches on each
+  timer tick.
+- **`boot/switch.asm`** — `context_switch(pcb_t *cur, pcb_t *next)`: saves the
+  outgoing process's ESP into its PCB, loads ESP from the incoming process's PCB,
+  and resumes execution via `POPAD; RET`.
+- **`kernel/kernel.c`** — Three processes are created at boot: `shell` (priority 2,
+  runs the interactive shell), `process_a` and `process_b` (priority 1, each print
+  a different character at a different rate to demonstrate true concurrent
+  execution under the scheduler).
+- **`ps` shell command** — lists all PCBs with PID, state, priority, and name.
+
+### How to test
+
+```bash
+make clean && make all
+make run
+```
+
+- Splash screen should read "Stage 1: Process Table & Round-Robin Scheduler".
+- The `A` (green) and `B` (cyan) characters cycle inside the top banner at
+  different speeds, proving two processes are running concurrently, preempted by
+  the 100 Hz timer interrupt.
+- Type `ps` at the `ksh>` prompt — lists all three processes with correct states.
+- The shell remains fully responsive while `process_a`/`process_b` keep running
+  in the background (true preemptive multitasking, not cooperative).
+
+### Implementation notes / things that tripped us up
+
+Two non-obvious bugs came up during development, worth documenting since they're
+common pitfalls in this kind of software context switch:
+
+1. **Initial handoff from `kernel_main`.** The scheduler must not passively wait
+   for the first timer interrupt to switch into the first process — the CPU is
+   still running on `kernel_main`'s own boot stack at that point, and the first
+   process's PCB has never been genuinely "current." `scheduler_start()` performs
+   an explicit `context_switch()` from a throwaway boot context into the first
+   real process before enabling interrupts.
+2. **Interrupt flag on first run.** A context switch into a brand-new process
+   uses a plain `RET` (not `IRET`), which does not restore EFLAGS. Since the CPU
+   disables interrupts automatically when an interrupt gate is entered, a newly
+   started process would otherwise run with interrupts permanently off, freezing
+   the scheduler. Each process explicitly re-enables interrupts (`sti`) as its
+   first instruction to guarantee preemption keeps working regardless of whether
+   it's running for the first time or resuming.
