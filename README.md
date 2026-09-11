@@ -309,3 +309,62 @@ an address space" and "processes with separate address spaces" aren't currently
 distinguishable in practice — everything lives in one physical address space.
 `parent_pid` is used purely as bookkeeping to reflect the logical
 process/thread relationship from L10, not as an enforced memory boundary.
+
+---
+
+## Stage 3 — Physical Memory Manager (Lecture 11)
+
+**Status:** Complete — tagged `v0.4-stage3`
+
+### What was implemented
+
+- **`boot/boot.asm`** — added a `detect_memory` subroutine using BIOS
+  `INT 0x15, EAX=0xE820` to enumerate the real memory map before switching to
+  protected mode (this must happen in real mode, so it's the one part of
+  Stage 3 that lives in the bootloader rather than the kernel). Results are
+  written to a fixed buffer at physical address `0x8000`: a `uint32_t` entry
+  count followed by an array of 24-byte E820 entries. The boot sector remained
+  within the mandatory 512-byte MBR limit with 4 bytes to spare.
+- **`kernel/pmm.h` / `kernel/pmm.c`** — bitmap physical frame allocator, one
+  bit per 4 KB frame. `pmm_init()` reads the total usable memory (computed
+  from the E820 table by `kernel.c`'s `detect_memory_size()`) and reserves
+  the first 1 MB (frames 0–255) unconditionally — this safely covers the
+  real-mode IVT, BIOS data area, the E820 buffer itself, video memory, and
+  the kernel image (loaded at `0x10000`, nowhere near 1 MB). `pmm_alloc_frame()`
+  does a first-fit scan; `pmm_free_frame()` clears the corresponding bit.
+- **`kernel/process.c`** — process stacks are now allocated via
+  `pmm_alloc_frame()` instead of a static array, so the PMM is genuinely
+  load-bearing rather than a side feature: every process and thread created
+  from Stage 1 onward now draws its 4 KB stack from the physical memory
+  manager.
+- **`meminfo` shell command** — prints total/used/free frames and KB.
+- **`pmmtest` shell command** — allocates 10 frames, frees two of them,
+  allocates two more, and verifies the freed frames were reused (first-fit
+  behaviour), matching the milestone's required self-test.
+
+### How to test
+
+```bash
+make clean && make all
+make run
+```
+
+At `ksh>`:
+- `meminfo` — shows real detected memory (not a hardcoded value — the total
+  frame count reflects whatever QEMU/BIOS actually reports via E820).
+- `pmmtest` — always prints `PASS: freed frames were correctly reused (first-fit)`.
+- `ps` — still lists all processes correctly, confirming PMM-backed stacks
+  didn't break process creation.
+- `race`, `race_mutex`, `pc` (Stage 2 demos) — still behave identically,
+  confirming thread creation through the same PMM-backed path works correctly.
+
+### Implementation notes
+
+Exact frame addresses will differ from the illustrative example in the
+lecture notes (which assumes a specific pre-existing reservation), since our
+reserved region size (first 1 MB / 256 frames) is a deliberate simplification
+rather than a computed `KERNEL_END` symbol from the linker script — chosen to
+avoid the risk of modifying `linker.ld` and because the kernel image is
+comfortably smaller than 1 MB regardless of exact size. `pmmtest` verifies the
+*behaviour* (reuse of freed frames) rather than checking against fixed
+addresses, since those addresses are an artifact of a specific memory layout.

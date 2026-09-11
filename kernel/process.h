@@ -21,7 +21,8 @@ typedef struct {
     uint32_t     eip;
     int          priority;
     char         name[32];
-    int          parent_pid;   /* 0 = top-level process; nonzero = thread of that pid (L10) */
+    int          parent_pid;
+    uint32_t     stack_base;   /* physical frame from pmm_alloc_frame() (L11/Stage3) */
 } pcb_t;
 
 extern pcb_t process_table[MAX_PROCESSES];

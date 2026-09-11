@@ -1,12 +1,11 @@
 #include "process.h"
+#include "pmm.h"
 
 pcb_t process_table[MAX_PROCESSES];
 int   process_count = 0;
 
-static uint8_t stacks[MAX_PROCESSES][STACK_SIZE];
-
-static uint32_t build_initial_stack(int slot, void (*entry)(void)) {
-    uint32_t *sp = (uint32_t *)(stacks[slot] + STACK_SIZE);
+static uint32_t build_initial_stack(uint32_t stack_base, void (*entry)(void)) {
+    uint32_t *sp = (uint32_t *)(stack_base + STACK_SIZE);
 
     *(--sp) = (uint32_t)entry;
     *(--sp) = 0;
@@ -24,6 +23,9 @@ static uint32_t build_initial_stack(int slot, void (*entry)(void)) {
 int create_process(const char *name, void (*entry)(void), int priority) {
     if (process_count >= MAX_PROCESSES) return -1;
 
+    uint32_t stack_frame = pmm_alloc_frame();
+    if (stack_frame == 0) return -1;
+
     int slot = process_count++;
     pcb_t *p = &process_table[slot];
 
@@ -31,7 +33,8 @@ int create_process(const char *name, void (*entry)(void), int priority) {
     p->state      = PROC_READY;
     p->eip        = (uint32_t)entry;
     p->priority   = priority;
-    p->esp        = build_initial_stack(slot, entry);
+    p->stack_base = stack_frame;
+    p->esp        = build_initial_stack(stack_frame, entry);
     p->parent_pid = 0;
 
     int i = 0;

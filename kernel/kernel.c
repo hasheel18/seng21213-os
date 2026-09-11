@@ -1,5 +1,5 @@
 /* =============================================================================
- * SENG21213-OS :: Main Kernel  (Stage 2 - Threads, Mutex & Semaphore)
+ * SENG21213-OS :: Main Kernel  (Stage 3 - Physical Memory Manager)
  * File   : kernel/kernel.c
  * ============================================================================*/
 
@@ -13,16 +13,18 @@
 #include "thread.h"
 #include "mutex.h"
 #include "semaphore.h"
+#include "pmm.h"
 
 static void cmd_help(void);
 static void cmd_clear(void);
 static void cmd_about(void);
 static void cmd_echo(const char *args);
-static void cmd_mem(void);
 static void cmd_ps(void);
 static void cmd_threads(void);
 static void cmd_race(int use_mutex);
 static void cmd_pc(void);
+static void cmd_meminfo(void);
+static void cmd_pmmtest(void);
 
 static int k_strcmp(const char *a, const char *b) {
     while (*a && (*a == *b)) { a++; b++; }
@@ -46,7 +48,35 @@ static const char *k_ltrim(const char *s) {
 }
 
 /* ---------------------------------------------------------------------------
- * Stage 1 demo processes (kept from Stage 1 - still prove the scheduler works)
+ * Stage 3: BIOS E820 memory map, read from the fixed buffer the bootloader
+ * filled in before switching to protected mode (boot/boot.asm). (L11 4.1)
+ * --------------------------------------------------------------------------*/
+typedef struct __attribute__((packed)) {
+    uint32_t base_low, base_high;
+    uint32_t length_low, length_high;
+    uint32_t type;
+    uint32_t acpi_ext;
+} e820_entry_t;
+
+#define E820_TYPE_USABLE 1
+
+static uint32_t detect_memory_size(void) {
+    uint32_t count = *(volatile uint32_t *)0x8000;
+    e820_entry_t *entries = (e820_entry_t *)0x8004;
+    uint32_t total = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (entries[i].type == E820_TYPE_USABLE && entries[i].base_high == 0) {
+            total += entries[i].length_low;
+        }
+    }
+
+    if (total == 0) total = 32u * 1024u * 1024u;  /* fallback if E820 unsupported */
+    return total;
+}
+
+/* ---------------------------------------------------------------------------
+ * Stage 1 demo processes
  * --------------------------------------------------------------------------*/
 static void process_a(void) {
     __asm__ __volatile__("sti");
@@ -71,7 +101,7 @@ static void process_b(void) {
 }
 
 /* ---------------------------------------------------------------------------
- * Stage 2 Test 1: myglobal race condition (L10 Section 3.4)
+ * Stage 2: race condition + producer-consumer demos
  * --------------------------------------------------------------------------*/
 static volatile int myglobal = 0;
 static volatile int race_threads_done = 0;
@@ -82,15 +112,12 @@ static void race_thread(void) {
     __asm__ __volatile__("sti");
     for (int i = 0; i < 20; i++) {
         if (race_use_mutex) mutex_lock(&global_mutex);
-
-        int j = myglobal;                              /* (1) READ */
-        j = j + 1;                                      /* (2) MODIFY */
-        for (volatile int d = 0; d < 300000; d++) { }    /* widen the window */
-        myglobal = j;                                    /* (3) WRITE */
-
+        int j = myglobal;
+        j = j + 1;
+        for (volatile int d = 0; d < 300000; d++) { }
+        myglobal = j;
         if (race_use_mutex) mutex_unlock(&global_mutex);
     }
-
     race_threads_done++;
     pcb_t *cur = scheduler_current();
     if (cur) cur->state = PROC_ZOMBIE;
@@ -114,18 +141,9 @@ static void cmd_race(int use_mutex) {
     while (race_threads_done < 2) { }
 
     vga_printf("  myglobal = %d   (expected 40)\n", myglobal);
-    if (!use_mutex && myglobal == 40) {
-        vga_puts_color("  (No corruption this run - race conditions are non-deterministic, try again)\n",
-                       VGA_LIGHT_GREY, VGA_BLACK);
-    }
     vga_puts("\n");
 }
 
-/* ---------------------------------------------------------------------------
- * Stage 2 Test 2: Producer-Consumer, bounded buffer size 5 (L10 3.4)
- * semaphore naming follows the lecture: e = empty slots, n = full slots (items),
- * s = mutex protecting the buffer.
- * --------------------------------------------------------------------------*/
 #define PC_BUF_SIZE 5
 static int pc_buffer[PC_BUF_SIZE];
 static int pc_in = 0, pc_out = 0;
@@ -137,14 +155,11 @@ static void producer_thread(void) {
     for (int item = 1; item <= 10; item++) {
         sem_wait(&pc_e);
         sem_wait(&pc_s);
-
         pc_buffer[pc_in] = item;
         pc_in = (pc_in + 1) % PC_BUF_SIZE;
         pc_produced++;
-
         sem_signal(&pc_s);
         sem_signal(&pc_n);
-
         for (volatile int d = 0; d < 500000; d++) { }
     }
     pcb_t *cur = scheduler_current();
@@ -157,15 +172,12 @@ static void consumer_thread(void) {
     for (int i = 0; i < 10; i++) {
         sem_wait(&pc_n);
         sem_wait(&pc_s);
-
         int item = pc_buffer[pc_out];
         pc_out = (pc_out + 1) % PC_BUF_SIZE;
         pc_consumed++;
         (void)item;
-
         sem_signal(&pc_s);
         sem_signal(&pc_e);
-
         for (volatile int d = 0; d < 700000; d++) { }
     }
     pc_done = 1;
@@ -207,7 +219,7 @@ static void print_splash(void) {
                    VGA_YELLOW, VGA_BLACK);
 
     vga_set_cursor(2, 2);
-    vga_puts_color("  Stage 2: Threads, Mutex & Semaphore", VGA_LIGHT_CYAN, VGA_BLACK);
+    vga_puts_color("  Stage 3: Physical Memory Manager", VGA_LIGHT_CYAN, VGA_BLACK);
 
     vga_set_cursor(3, 2);
     vga_puts_color("  Faculty of Engineering - Department of Software Engineering",
@@ -233,7 +245,7 @@ static void print_splash(void) {
     vga_puts_color("    [L10] ", VGA_YELLOW, VGA_BLACK);
     vga_puts("Threads & Sync      - DONE: threads, mutex, semaphore\n");
     vga_puts_color("    [L11] ", VGA_YELLOW, VGA_BLACK);
-    vga_puts("Memory Management   - physical page allocator, virtual memory\n");
+    vga_puts("Memory Management   - DONE: E820 detection, bitmap frame allocator\n");
     vga_puts_color("    [L12] ", VGA_YELLOW, VGA_BLACK);
     vga_puts("File System         - RAM disk, FAT-like directory structure\n");
     vga_puts("\n");
@@ -249,15 +261,15 @@ static void cmd_help(void) {
     vga_puts("  clear      - Clear the screen\n");
     vga_puts("  about      - About this OS and course\n");
     vga_puts("  echo       - Echo text to screen\n");
-    vga_puts("  mem        - Memory map (stub)\n");
     vga_puts("  ps         - [L09] List processes\n");
     vga_puts("  threads    - [L10] List kernel threads\n");
     vga_puts("  race       - [L10] Race condition demo (no mutex)\n");
     vga_puts("  race_mutex - [L10] Same demo, WITH mutex protection\n");
     vga_puts("  pc         - [L10] Producer-consumer demo (semaphores)\n");
+    vga_puts("  meminfo    - [L11] Show physical memory usage\n");
+    vga_puts("  pmmtest    - [L11] PMM self-test (alloc/free/reuse)\n");
     vga_puts_color("\n  Milestones (to implement):\n", VGA_LIGHT_CYAN, VGA_BLACK);
     vga_puts("  kill    - [L09] Terminate a process\n");
-    vga_puts("  free    - [L11] Show free memory\n");
     vga_puts("  ls      - [L12] List files\n");
     vga_puts("  cat     - [L12] Print file contents\n\n");
 }
@@ -281,18 +293,6 @@ static void cmd_echo(const char *args) {
     vga_puts("  ");
     vga_puts(args);
     vga_puts("\n");
-}
-
-static void cmd_mem(void) {
-    vga_puts_color("\n  Memory Map (stub - implement PMM in Lecture 11)\n",
-                   VGA_LIGHT_CYAN, VGA_BLACK);
-    vga_puts("  -----------------------------------------------\n");
-    vga_puts("  0x00000000 - 0x000FFFFF  :  First 1 MB (reserved/BIOS)\n");
-    vga_puts("  0x00100000 - 0x00EFFFFF  :  Extended memory (usable ~14 MB)\n");
-    vga_puts("  0x00F00000 - 0x00FFFFFF  :  BIOS / ROM area\n");
-    vga_puts("  0xB8000    - 0xBFFFF     :  VGA frame buffer\n");
-    vga_puts_color("\n  TODO: Use BIOS int 0x15, EAX=0xE820 to get real memory map\n\n",
-                   VGA_YELLOW, VGA_BLACK);
 }
 
 static void cmd_ps(void) {
@@ -329,6 +329,55 @@ static void cmd_threads(void) {
     vga_puts("\n");
 }
 
+static void cmd_meminfo(void) {
+    uint32_t total = pmm_total_frames();
+    uint32_t used  = pmm_used_frames();
+    uint32_t free_ = pmm_free_frames();
+
+    vga_puts_color("\n  Physical Memory Manager (L11)\n", VGA_LIGHT_CYAN, VGA_BLACK);
+    vga_puts("  -----------------------------------------------\n");
+    vga_printf("  Total : %d frames  (%d KB)\n", total, total * 4);
+    vga_printf("  Used  : %d frames  (%d KB)\n", used, used * 4);
+    vga_printf("  Free  : %d frames  (%d KB)\n", free_, free_ * 4);
+    vga_puts("\n");
+}
+
+static void cmd_pmmtest(void) {
+    vga_puts_color("\n  PMM self-test: allocate 10, free #3 and #7, allocate 2 more\n",
+                   VGA_YELLOW, VGA_BLACK);
+
+    uint32_t addrs[10];
+    for (int i = 0; i < 10; i++) addrs[i] = pmm_alloc_frame();
+
+    vga_printf("  First of 10 allocated: 0x%x\n", addrs[0]);
+
+    pmm_free_frame(addrs[3]);
+    pmm_free_frame(addrs[7]);
+
+    uint32_t r1 = pmm_alloc_frame();
+    uint32_t r2 = pmm_alloc_frame();
+
+    vga_printf("  Freed:        0x%x and 0x%x\n", addrs[3], addrs[7]);
+    vga_printf("  Reallocated:  0x%x and 0x%x\n", r1, r2);
+
+    if (r1 == addrs[3] && r2 == addrs[7]) {
+        vga_puts_color("  PASS: freed frames were correctly reused (first-fit)\n",
+                       VGA_LIGHT_GREEN, VGA_BLACK);
+    } else {
+        vga_puts_color("  FAIL: reuse did not match expected frames\n",
+                       VGA_LIGHT_RED, VGA_BLACK);
+    }
+
+    /* clean up so repeated test runs don't permanently eat memory */
+    pmm_free_frame(r1);
+    pmm_free_frame(r2);
+    for (int i = 0; i < 10; i++) {
+        if (i == 3 || i == 7) continue;
+        pmm_free_frame(addrs[i]);
+    }
+    vga_puts("\n");
+}
+
 /* ---------------------------------------------------------------------------
  * Shell process
  * --------------------------------------------------------------------------*/
@@ -349,12 +398,13 @@ static void shell_run(void) {
         if (k_strcmp(cmd, "help")       == 0) { cmd_help();       continue; }
         if (k_strcmp(cmd, "clear")      == 0) { cmd_clear();      continue; }
         if (k_strcmp(cmd, "about")      == 0) { cmd_about();      continue; }
-        if (k_strcmp(cmd, "mem")        == 0) { cmd_mem();        continue; }
         if (k_strcmp(cmd, "ps")         == 0) { cmd_ps();         continue; }
         if (k_strcmp(cmd, "threads")    == 0) { cmd_threads();    continue; }
         if (k_strcmp(cmd, "race")       == 0) { cmd_race(0);      continue; }
         if (k_strcmp(cmd, "race_mutex") == 0) { cmd_race(1);      continue; }
         if (k_strcmp(cmd, "pc")         == 0) { cmd_pc();         continue; }
+        if (k_strcmp(cmd, "meminfo")    == 0) { cmd_meminfo();    continue; }
+        if (k_strcmp(cmd, "pmmtest")    == 0) { cmd_pmmtest();    continue; }
 
         if (k_strncmp(cmd, "echo ", 5) == 0) {
             cmd_echo(k_ltrim(cmd + 5));
@@ -362,7 +412,6 @@ static void shell_run(void) {
         }
 
         if (k_strcmp(cmd, "kill") == 0 ||
-            k_strcmp(cmd, "free") == 0 ||
             k_strcmp(cmd, "ls")   == 0 ||
             k_strcmp(cmd, "cat")  == 0) {
             vga_puts_color("  [TODO] This command is not yet implemented.\n",
@@ -388,6 +437,8 @@ void kernel_main(void) {
     vga_init();
     kb_init();
     idt_init();
+
+    pmm_init(detect_memory_size());   /* must run before any create_process() call */
 
     create_process("shell",     shell_entry, 2);
     create_process("process_a", process_a,   1);
