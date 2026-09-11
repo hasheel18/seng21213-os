@@ -1,5 +1,5 @@
 /* =============================================================================
- * SENG21213-OS :: Main Kernel  (Stage 1 - Process Table & Round-Robin Scheduler)
+ * SENG21213-OS :: Main Kernel  (Stage 2 - Threads, Mutex & Semaphore)
  * File   : kernel/kernel.c
  * ============================================================================*/
 
@@ -10,6 +10,9 @@
 #include "process.h"
 #include "scheduler.h"
 #include "irq.h"
+#include "thread.h"
+#include "mutex.h"
+#include "semaphore.h"
 
 static void cmd_help(void);
 static void cmd_clear(void);
@@ -17,6 +20,9 @@ static void cmd_about(void);
 static void cmd_echo(const char *args);
 static void cmd_mem(void);
 static void cmd_ps(void);
+static void cmd_threads(void);
+static void cmd_race(int use_mutex);
+static void cmd_pc(void);
 
 static int k_strcmp(const char *a, const char *b) {
     while (*a && (*a == *b)) { a++; b++; }
@@ -39,6 +45,9 @@ static const char *k_ltrim(const char *s) {
     return s;
 }
 
+/* ---------------------------------------------------------------------------
+ * Stage 1 demo processes (kept from Stage 1 - still prove the scheduler works)
+ * --------------------------------------------------------------------------*/
 static void process_a(void) {
     __asm__ __volatile__("sti");
     int col = 0;
@@ -61,6 +70,134 @@ static void process_b(void) {
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Stage 2 Test 1: myglobal race condition (L10 Section 3.4)
+ * --------------------------------------------------------------------------*/
+static volatile int myglobal = 0;
+static volatile int race_threads_done = 0;
+static int race_use_mutex = 0;
+static mutex_t global_mutex;
+
+static void race_thread(void) {
+    __asm__ __volatile__("sti");
+    for (int i = 0; i < 20; i++) {
+        if (race_use_mutex) mutex_lock(&global_mutex);
+
+        int j = myglobal;                              /* (1) READ */
+        j = j + 1;                                      /* (2) MODIFY */
+        for (volatile int d = 0; d < 300000; d++) { }    /* widen the window */
+        myglobal = j;                                    /* (3) WRITE */
+
+        if (race_use_mutex) mutex_unlock(&global_mutex);
+    }
+
+    race_threads_done++;
+    pcb_t *cur = scheduler_current();
+    if (cur) cur->state = PROC_ZOMBIE;
+    while (1) { schedule(); }
+}
+
+static void cmd_race(int use_mutex) {
+    myglobal = 0;
+    race_threads_done = 0;
+    race_use_mutex = use_mutex;
+    mutex_init(&global_mutex);
+
+    create_thread("race1", race_thread, 1, 1);
+    create_thread("race2", race_thread, 1, 1);
+
+    vga_puts_color(use_mutex
+        ? "\n  Running race demo WITH mutex protection...\n"
+        : "\n  Running race demo WITHOUT protection (expect corruption)...\n",
+        VGA_YELLOW, VGA_BLACK);
+
+    while (race_threads_done < 2) { }
+
+    vga_printf("  myglobal = %d   (expected 40)\n", myglobal);
+    if (!use_mutex && myglobal == 40) {
+        vga_puts_color("  (No corruption this run - race conditions are non-deterministic, try again)\n",
+                       VGA_LIGHT_GREY, VGA_BLACK);
+    }
+    vga_puts("\n");
+}
+
+/* ---------------------------------------------------------------------------
+ * Stage 2 Test 2: Producer-Consumer, bounded buffer size 5 (L10 3.4)
+ * semaphore naming follows the lecture: e = empty slots, n = full slots (items),
+ * s = mutex protecting the buffer.
+ * --------------------------------------------------------------------------*/
+#define PC_BUF_SIZE 5
+static int pc_buffer[PC_BUF_SIZE];
+static int pc_in = 0, pc_out = 0;
+static sem_t pc_e, pc_n, pc_s;
+static volatile int pc_produced = 0, pc_consumed = 0, pc_done = 0;
+
+static void producer_thread(void) {
+    __asm__ __volatile__("sti");
+    for (int item = 1; item <= 10; item++) {
+        sem_wait(&pc_e);
+        sem_wait(&pc_s);
+
+        pc_buffer[pc_in] = item;
+        pc_in = (pc_in + 1) % PC_BUF_SIZE;
+        pc_produced++;
+
+        sem_signal(&pc_s);
+        sem_signal(&pc_n);
+
+        for (volatile int d = 0; d < 500000; d++) { }
+    }
+    pcb_t *cur = scheduler_current();
+    if (cur) cur->state = PROC_ZOMBIE;
+    while (1) { schedule(); }
+}
+
+static void consumer_thread(void) {
+    __asm__ __volatile__("sti");
+    for (int i = 0; i < 10; i++) {
+        sem_wait(&pc_n);
+        sem_wait(&pc_s);
+
+        int item = pc_buffer[pc_out];
+        pc_out = (pc_out + 1) % PC_BUF_SIZE;
+        pc_consumed++;
+        (void)item;
+
+        sem_signal(&pc_s);
+        sem_signal(&pc_e);
+
+        for (volatile int d = 0; d < 700000; d++) { }
+    }
+    pc_done = 1;
+    pcb_t *cur = scheduler_current();
+    if (cur) cur->state = PROC_ZOMBIE;
+    while (1) { schedule(); }
+}
+
+static void cmd_pc(void) {
+    pc_in = 0; pc_out = 0;
+    pc_produced = 0; pc_consumed = 0; pc_done = 0;
+
+    sem_init(&pc_e, PC_BUF_SIZE);
+    sem_init(&pc_n, 0);
+    sem_init(&pc_s, 1);
+
+    create_thread("producer", producer_thread, 1, 1);
+    create_thread("consumer", consumer_thread, 1, 1);
+
+    vga_puts_color("\n  Running producer-consumer demo (buffer size 5)...\n",
+                   VGA_YELLOW, VGA_BLACK);
+
+    while (!pc_done) { }
+
+    vga_printf("  Produced: %d   Consumed: %d   (expected 10 / 10, no corruption)\n",
+               pc_produced, pc_consumed);
+    vga_puts("\n");
+}
+
+/* ---------------------------------------------------------------------------
+ * Splash Screen
+ * --------------------------------------------------------------------------*/
 static void print_splash(void) {
     vga_clear(VGA_BLACK);
     vga_draw_box(0, 0, 7, 80, VGA_LIGHT_MAGENTA);
@@ -70,7 +207,7 @@ static void print_splash(void) {
                    VGA_YELLOW, VGA_BLACK);
 
     vga_set_cursor(2, 2);
-    vga_puts_color("  Stage 1: Process Table & Round-Robin Scheduler", VGA_LIGHT_CYAN, VGA_BLACK);
+    vga_puts_color("  Stage 2: Threads, Mutex & Semaphore", VGA_LIGHT_CYAN, VGA_BLACK);
 
     vga_set_cursor(3, 2);
     vga_puts_color("  Faculty of Engineering - Department of Software Engineering",
@@ -94,7 +231,7 @@ static void print_splash(void) {
     vga_puts_color("    [L09] ", VGA_YELLOW, VGA_BLACK);
     vga_puts("Process Management  - DONE: PCB, ready queue, round-robin scheduler\n");
     vga_puts_color("    [L10] ", VGA_YELLOW, VGA_BLACK);
-    vga_puts("Threads & Sync      - kernel threads, mutex, semaphore\n");
+    vga_puts("Threads & Sync      - DONE: threads, mutex, semaphore\n");
     vga_puts_color("    [L11] ", VGA_YELLOW, VGA_BLACK);
     vga_puts("Memory Management   - physical page allocator, virtual memory\n");
     vga_puts_color("    [L12] ", VGA_YELLOW, VGA_BLACK);
@@ -102,18 +239,24 @@ static void print_splash(void) {
     vga_puts("\n");
 }
 
+/* ---------------------------------------------------------------------------
+ * Shell command implementations
+ * --------------------------------------------------------------------------*/
 static void cmd_help(void) {
     vga_puts_color("\n  SENG21213-OS Shell Commands\n", VGA_YELLOW, VGA_BLACK);
     vga_puts("  -----------------------------------------------\n");
-    vga_puts("  help    - Show this help message\n");
-    vga_puts("  clear   - Clear the screen\n");
-    vga_puts("  about   - About this OS and course\n");
-    vga_puts("  echo    - Echo text to screen\n");
-    vga_puts("  mem     - Memory map (stub)\n");
-    vga_puts("  ps      - [L09] List processes\n");
+    vga_puts("  help       - Show this help message\n");
+    vga_puts("  clear      - Clear the screen\n");
+    vga_puts("  about      - About this OS and course\n");
+    vga_puts("  echo       - Echo text to screen\n");
+    vga_puts("  mem        - Memory map (stub)\n");
+    vga_puts("  ps         - [L09] List processes\n");
+    vga_puts("  threads    - [L10] List kernel threads\n");
+    vga_puts("  race       - [L10] Race condition demo (no mutex)\n");
+    vga_puts("  race_mutex - [L10] Same demo, WITH mutex protection\n");
+    vga_puts("  pc         - [L10] Producer-consumer demo (semaphores)\n");
     vga_puts_color("\n  Milestones (to implement):\n", VGA_LIGHT_CYAN, VGA_BLACK);
     vga_puts("  kill    - [L09] Terminate a process\n");
-    vga_puts("  threads - [L10] List kernel threads\n");
     vga_puts("  free    - [L11] Show free memory\n");
     vga_puts("  ls      - [L12] List files\n");
     vga_puts("  cat     - [L12] Print file contents\n\n");
@@ -153,7 +296,7 @@ static void cmd_mem(void) {
 }
 
 static void cmd_ps(void) {
-    vga_puts_color("\n  PID  STATE     PRI  NAME\n", VGA_YELLOW, VGA_BLACK);
+    vga_puts_color("\n  PID  STATE     PRI  PARENT  NAME\n", VGA_YELLOW, VGA_BLACK);
     vga_puts("  -----------------------------------------------\n");
     for (int i = 0; i < process_count; i++) {
         pcb_t *p = &process_table[i];
@@ -161,11 +304,34 @@ static void cmd_ps(void) {
             p->state == PROC_READY   ? "READY"   :
             p->state == PROC_RUNNING ? "RUNNING" :
             p->state == PROC_BLOCKED ? "BLOCKED" : "ZOMBIE";
-        vga_printf("  %d    %s   %d    %s\n", p->pid, state_str, p->priority, p->name);
+        vga_printf("  %d    %s   %d    %d       %s\n",
+                   p->pid, state_str, p->priority, p->parent_pid, p->name);
     }
     vga_puts("\n");
 }
 
+static void cmd_threads(void) {
+    vga_puts_color("\n  TID  STATE     PRI  PARENT  NAME\n", VGA_YELLOW, VGA_BLACK);
+    vga_puts("  -----------------------------------------------\n");
+    int any = 0;
+    for (int i = 0; i < process_count; i++) {
+        pcb_t *p = &process_table[i];
+        if (p->parent_pid == 0) continue;
+        any = 1;
+        const char *state_str =
+            p->state == PROC_READY   ? "READY"   :
+            p->state == PROC_RUNNING ? "RUNNING" :
+            p->state == PROC_BLOCKED ? "BLOCKED" : "ZOMBIE";
+        vga_printf("  %d    %s   %d    %d       %s\n",
+                   p->pid, state_str, p->priority, p->parent_pid, p->name);
+    }
+    if (!any) vga_puts("  (no threads yet - try 'race', 'race_mutex', or 'pc')\n");
+    vga_puts("\n");
+}
+
+/* ---------------------------------------------------------------------------
+ * Shell process
+ * --------------------------------------------------------------------------*/
 static char  shell_buf[256];
 static char  prompt[] = "\n  ksh> ";
 
@@ -180,22 +346,25 @@ static void shell_run(void) {
         const char *cmd = k_ltrim(shell_buf);
         if (k_strlen(cmd) == 0) continue;
 
-        if (k_strcmp(cmd, "help")  == 0) { cmd_help();  continue; }
-        if (k_strcmp(cmd, "clear") == 0) { cmd_clear(); continue; }
-        if (k_strcmp(cmd, "about") == 0) { cmd_about(); continue; }
-        if (k_strcmp(cmd, "mem")   == 0) { cmd_mem();   continue; }
-        if (k_strcmp(cmd, "ps")    == 0) { cmd_ps();    continue; }
+        if (k_strcmp(cmd, "help")       == 0) { cmd_help();       continue; }
+        if (k_strcmp(cmd, "clear")      == 0) { cmd_clear();      continue; }
+        if (k_strcmp(cmd, "about")      == 0) { cmd_about();      continue; }
+        if (k_strcmp(cmd, "mem")        == 0) { cmd_mem();        continue; }
+        if (k_strcmp(cmd, "ps")         == 0) { cmd_ps();         continue; }
+        if (k_strcmp(cmd, "threads")    == 0) { cmd_threads();    continue; }
+        if (k_strcmp(cmd, "race")       == 0) { cmd_race(0);      continue; }
+        if (k_strcmp(cmd, "race_mutex") == 0) { cmd_race(1);      continue; }
+        if (k_strcmp(cmd, "pc")         == 0) { cmd_pc();         continue; }
 
         if (k_strncmp(cmd, "echo ", 5) == 0) {
             cmd_echo(k_ltrim(cmd + 5));
             continue;
         }
 
-        if (k_strcmp(cmd, "kill")    == 0 ||
-            k_strcmp(cmd, "threads") == 0 ||
-            k_strcmp(cmd, "free")    == 0 ||
-            k_strcmp(cmd, "ls")      == 0 ||
-            k_strcmp(cmd, "cat")     == 0) {
+        if (k_strcmp(cmd, "kill") == 0 ||
+            k_strcmp(cmd, "free") == 0 ||
+            k_strcmp(cmd, "ls")   == 0 ||
+            k_strcmp(cmd, "cat")  == 0) {
             vga_puts_color("  [TODO] This command is not yet implemented.\n",
                            VGA_YELLOW, VGA_BLACK);
             vga_puts("  Implement it as part of your lecture assignment.\n");

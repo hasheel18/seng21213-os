@@ -256,3 +256,56 @@ common pitfalls in this kind of software context switch:
    the scheduler. Each process explicitly re-enables interrupts (`sti`) as its
    first instruction to guarantee preemption keeps working regardless of whether
    it's running for the first time or resuming.
+
+---
+
+## Stage 2 — Threads, Mutex & Semaphore (Lecture 10)
+
+**Status:** Complete — tagged `v0.3-stage2`
+
+### What was implemented
+
+- **`kernel/thread.h` / `kernel/thread.c`** — `create_thread()`. This kernel has a
+  single flat address space (no paging yet — see Stage 3), so "threads sharing
+  the process's address space" (L10 1.1) is automatically true for every
+  schedulable entity. Threads reuse the exact same PCB / scheduler /
+  `context_switch` machinery from Stage 1, tagged with `pcb_t.parent_pid` so
+  `ps`/`threads` can distinguish top-level processes from threads spawned by them.
+- **`kernel/mutex.h` / `kernel/mutex.c`** — binary mutex. Uses `cli`/`sti` around
+  its own bookkeeping as the uniprocessor mutual-exclusion primitive (L10 3.2
+  covers CAS/XCHG for multi-core hardware; disabling interrupts is the
+  single-core equivalent, valid since QEMU is given one CPU core here). A
+  blocked thread is marked `PROC_BLOCKED`, which the Stage 1 round-robin
+  scheduler already skips; `mutex_unlock()` hands the lock directly to the next
+  waiter to avoid re-triggering the race it's protecting against.
+- **`kernel/semaphore.h` / `kernel/semaphore.c`** — counting semaphore,
+  `sem_wait()` / `sem_signal()`, same blocking mechanism as the mutex.
+- **`race` / `race_mutex` shell commands** — the `myglobal` race condition demo
+  from L10 3.4, ported into two kernel threads doing a non-atomic
+  READ-MODIFY-WRITE on a shared counter, run first without protection (visibly
+  loses updates) and then with the mutex (deterministically correct).
+- **`pc` shell command** — producer-consumer with a bounded buffer (size 5),
+  using three semaphores (`e` = empty slots, `n` = full slots, `s` = mutex),
+  matching the naming convention in the lecture notes.
+
+### How to test
+
+```bash
+make clean && make all
+make run
+```
+
+At `ksh>`:
+- `race` — repeat a few times; `myglobal` frequently prints below 40 (lost
+  updates from the unprotected critical section).
+- `race_mutex` — always prints exactly `myglobal = 40`.
+- `pc` — always prints `Produced: 10   Consumed: 10` with no corruption.
+- `threads` — lists the spawned thread PCBs after running the demos above.
+
+### Known simplification
+
+Because paging/virtual memory isn't implemented until Stage 3, "threads sharing
+an address space" and "processes with separate address spaces" aren't currently
+distinguishable in practice — everything lives in one physical address space.
+`parent_pid` is used purely as bookkeeping to reflect the logical
+process/thread relationship from L10, not as an enforced memory boundary.

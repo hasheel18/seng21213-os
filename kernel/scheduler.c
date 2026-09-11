@@ -17,6 +17,11 @@ void scheduler_start(void) {
     context_switch(&boot_pcb, &process_table[current_index]);
 }
 
+pcb_t *scheduler_current(void) {
+    if (current_index < 0) return 0;
+    return &process_table[current_index];
+}
+
 void schedule(void) {
     if (process_count <= 1) return;
 

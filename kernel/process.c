@@ -27,11 +27,12 @@ int create_process(const char *name, void (*entry)(void), int priority) {
     int slot = process_count++;
     pcb_t *p = &process_table[slot];
 
-    p->pid      = slot + 1;
-    p->state    = PROC_READY;
-    p->eip      = (uint32_t)entry;
-    p->priority = priority;
-    p->esp      = build_initial_stack(slot, entry);
+    p->pid        = slot + 1;
+    p->state      = PROC_READY;
+    p->eip        = (uint32_t)entry;
+    p->priority   = priority;
+    p->esp        = build_initial_stack(slot, entry);
+    p->parent_pid = 0;
 
     int i = 0;
     while (name[i] && i < 31) { p->name[i] = name[i]; i++; }

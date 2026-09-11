@@ -22,12 +22,15 @@ KERNEL_ASM_SRCS := kernel/kernel_entry.asm kernel/isr_stub.asm
 KERNEL_ASM_OBJS := build/kernel_entry.o build/isr_stub.o build/switch.o
 
 KERNEL_C_SRCS  := kernel/kernel.c \
-                   kernel/vga.c    \
+                   kernel/vga.c \
                    kernel/keyboard.c \
                    kernel/idt.c \
                    kernel/irq.c \
                    kernel/process.c \
-                   kernel/scheduler.c
+                   kernel/scheduler.c \
+                   kernel/thread.c \
+                   kernel/mutex.c \
+                   kernel/semaphore.c
 
 KERNEL_C_OBJS  := $(patsubst kernel/%.c, build/%.o, $(KERNEL_C_SRCS))
 KERNEL_ELF     := build/kernel.elf
