@@ -261,7 +261,7 @@ common pitfalls in this kind of software context switch:
 
 ## Stage 2 — Threads, Mutex & Semaphore (Lecture 10)
 
-**Status:** Complete — tagged `v0.3-stage2`
+**Status:** ✅ Complete — tagged `v0.3-stage2`
 
 ### What was implemented
 
@@ -314,7 +314,7 @@ process/thread relationship from L10, not as an enforced memory boundary.
 
 ## Stage 3 — Physical Memory Manager (Lecture 11)
 
-**Status:** Complete — tagged `v0.4-stage3`
+**Status:** ✅ Complete — tagged `v0.4-stage3`
 
 ### What was implemented
 
@@ -373,7 +373,7 @@ addresses, since those addresses are an artifact of a specific memory layout.
 
 ## Stage 4 — RAM Disk File System (Lecture 12)
 
-**Status:** Complete — tagged `v0.5-stage4`
+**Status:** ✅ Complete — tagged `v0.5-stage4`
 
 ### What was implemented
 
