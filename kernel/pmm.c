@@ -12,7 +12,7 @@
 #define FRAME_SIZE        4096u
 #define MAX_FRAMES        8192u
 #define BITMAP_WORDS      (MAX_FRAMES / 32)
-#define RESERVED_FRAMES   256u
+#define RESERVED_FRAMES   512u           /* first 2 MB - now covers the 1 MB ramdisk too */
 
 static uint32_t bitmap[BITMAP_WORDS];
 static uint32_t total_frames = 0;

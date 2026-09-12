@@ -1,5 +1,5 @@
 /* =============================================================================
- * SENG21213-OS :: Main Kernel  (Stage 3 - Physical Memory Manager)
+ * SENG21213-OS :: Main Kernel  (Stage 4 - RAM Disk File System)
  * File   : kernel/kernel.c
  * ============================================================================*/
 
@@ -14,6 +14,8 @@
 #include "mutex.h"
 #include "semaphore.h"
 #include "pmm.h"
+#include "ramdisk.h"
+#include "fs.h"
 
 static void cmd_help(void);
 static void cmd_clear(void);
@@ -25,6 +27,11 @@ static void cmd_race(int use_mutex);
 static void cmd_pc(void);
 static void cmd_meminfo(void);
 static void cmd_pmmtest(void);
+static void cmd_ls(void);
+static void cmd_touch(const char *name);
+static void cmd_cat(const char *name);
+static void cmd_write(const char *args);
+static void cmd_rm(const char *name);
 
 static int k_strcmp(const char *a, const char *b) {
     while (*a && (*a == *b)) { a++; b++; }
@@ -48,8 +55,7 @@ static const char *k_ltrim(const char *s) {
 }
 
 /* ---------------------------------------------------------------------------
- * Stage 3: BIOS E820 memory map, read from the fixed buffer the bootloader
- * filled in before switching to protected mode (boot/boot.asm). (L11 4.1)
+ * Stage 3: BIOS E820 memory map
  * --------------------------------------------------------------------------*/
 typedef struct __attribute__((packed)) {
     uint32_t base_low, base_high;
@@ -71,7 +77,7 @@ static uint32_t detect_memory_size(void) {
         }
     }
 
-    if (total == 0) total = 32u * 1024u * 1024u;  /* fallback if E820 unsupported */
+    if (total == 0) total = 32u * 1024u * 1024u;
     return total;
 }
 
@@ -219,7 +225,7 @@ static void print_splash(void) {
                    VGA_YELLOW, VGA_BLACK);
 
     vga_set_cursor(2, 2);
-    vga_puts_color("  Stage 3: Physical Memory Manager", VGA_LIGHT_CYAN, VGA_BLACK);
+    vga_puts_color("  Stage 4: RAM Disk File System", VGA_LIGHT_CYAN, VGA_BLACK);
 
     vga_set_cursor(3, 2);
     vga_puts_color("  Faculty of Engineering - Department of Software Engineering",
@@ -247,7 +253,7 @@ static void print_splash(void) {
     vga_puts_color("    [L11] ", VGA_YELLOW, VGA_BLACK);
     vga_puts("Memory Management   - DONE: E820 detection, bitmap frame allocator\n");
     vga_puts_color("    [L12] ", VGA_YELLOW, VGA_BLACK);
-    vga_puts("File System         - RAM disk, FAT-like directory structure\n");
+    vga_puts("File System         - DONE: RAM disk, i-node file system\n");
     vga_puts("\n");
 }
 
@@ -268,10 +274,13 @@ static void cmd_help(void) {
     vga_puts("  pc         - [L10] Producer-consumer demo (semaphores)\n");
     vga_puts("  meminfo    - [L11] Show physical memory usage\n");
     vga_puts("  pmmtest    - [L11] PMM self-test (alloc/free/reuse)\n");
+    vga_puts("  ls         - [L12] List files on the RAM disk\n");
+    vga_puts("  touch      - [L12] touch <name> - create an empty file\n");
+    vga_puts("  cat        - [L12] cat <name> - print file contents\n");
+    vga_puts("  write      - [L12] write <name> <text> - append text to a file\n");
+    vga_puts("  rm         - [L12] rm <name> - delete a file\n");
     vga_puts_color("\n  Milestones (to implement):\n", VGA_LIGHT_CYAN, VGA_BLACK);
-    vga_puts("  kill    - [L09] Terminate a process\n");
-    vga_puts("  ls      - [L12] List files\n");
-    vga_puts("  cat     - [L12] Print file contents\n\n");
+    vga_puts("  kill    - [L09] Terminate a process\n\n");
 }
 
 static void cmd_clear(void) {
@@ -368,7 +377,6 @@ static void cmd_pmmtest(void) {
                        VGA_LIGHT_RED, VGA_BLACK);
     }
 
-    /* clean up so repeated test runs don't permanently eat memory */
     pmm_free_frame(r1);
     pmm_free_frame(r2);
     for (int i = 0; i < 10; i++) {
@@ -376,6 +384,97 @@ static void cmd_pmmtest(void) {
         pmm_free_frame(addrs[i]);
     }
     vga_puts("\n");
+}
+
+/* ---------------------------------------------------------------------------
+ * Stage 4: RAM disk file system commands
+ * --------------------------------------------------------------------------*/
+static void ls_print_cb(const char *name, uint32_t size) {
+    vga_printf("  %s   (%d bytes)\n", name, size);
+}
+
+static void cmd_ls(void) {
+    vga_puts_color("\n  Files on RAM disk\n", VGA_YELLOW, VGA_BLACK);
+    vga_puts("  -----------------------------------------------\n");
+    fs_list(ls_print_cb);
+    vga_puts("\n");
+}
+
+static void cmd_touch(const char *name) {
+    if (k_strlen(name) == 0) {
+        vga_puts_color("  Usage: touch <filename>\n", VGA_LIGHT_RED, VGA_BLACK);
+        return;
+    }
+    int rc = fs_create(name);
+    if (rc == 0) {
+        vga_printf("  Created %s\n", name);
+    } else {
+        vga_puts_color("  Error: file exists, directory full, or no free inodes\n",
+                       VGA_LIGHT_RED, VGA_BLACK);
+    }
+}
+
+static void cmd_cat(const char *name) {
+    if (k_strlen(name) == 0) {
+        vga_puts_color("  Usage: cat <filename>\n", VGA_LIGHT_RED, VGA_BLACK);
+        return;
+    }
+    int fd = fs_open(name);
+    if (fd < 0) {
+        vga_puts_color("  Error: file not found\n", VGA_LIGHT_RED, VGA_BLACK);
+        return;
+    }
+    uint8_t buf[FS_MAX_FILE_SIZE + 1];
+    int n = fs_read(fd, buf, FS_MAX_FILE_SIZE);
+    if (n < 0) n = 0;
+    buf[n] = '\0';
+    vga_puts("  ");
+    vga_puts((const char *)buf);
+    vga_puts("\n");
+    fs_close(fd);
+}
+
+static void cmd_write(const char *args) {
+    args = k_ltrim(args);
+    if (k_strlen(args) == 0) {
+        vga_puts_color("  Usage: write <filename> <text>\n", VGA_LIGHT_RED, VGA_BLACK);
+        return;
+    }
+
+    char name[FS_MAX_NAME];
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < FS_MAX_NAME - 1) { name[i] = args[i]; i++; }
+    name[i] = '\0';
+
+    const char *text = k_ltrim(args + i);
+    if (k_strlen(text) == 0) {
+        vga_puts_color("  Usage: write <filename> <text>\n", VGA_LIGHT_RED, VGA_BLACK);
+        return;
+    }
+
+    int fd = fs_open(name);
+    if (fd < 0) {
+        vga_puts_color("  Error: file not found - use 'touch' first\n", VGA_LIGHT_RED, VGA_BLACK);
+        return;
+    }
+
+    int written = fs_write(fd, (const uint8_t *)text, (uint32_t)k_strlen(text));
+    fs_close(fd);
+
+    vga_printf("  Wrote %d bytes to %s\n", written, name);
+}
+
+static void cmd_rm(const char *name) {
+    if (k_strlen(name) == 0) {
+        vga_puts_color("  Usage: rm <filename>\n", VGA_LIGHT_RED, VGA_BLACK);
+        return;
+    }
+    int rc = fs_unlink(name);
+    if (rc == 0) {
+        vga_printf("  Removed %s\n", name);
+    } else {
+        vga_puts_color("  Error: file not found\n", VGA_LIGHT_RED, VGA_BLACK);
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -405,18 +504,17 @@ static void shell_run(void) {
         if (k_strcmp(cmd, "pc")         == 0) { cmd_pc();         continue; }
         if (k_strcmp(cmd, "meminfo")    == 0) { cmd_meminfo();    continue; }
         if (k_strcmp(cmd, "pmmtest")    == 0) { cmd_pmmtest();    continue; }
+        if (k_strcmp(cmd, "ls")         == 0) { cmd_ls();         continue; }
 
-        if (k_strncmp(cmd, "echo ", 5) == 0) {
-            cmd_echo(k_ltrim(cmd + 5));
-            continue;
-        }
+        if (k_strncmp(cmd, "echo ", 5) == 0)  { cmd_echo(k_ltrim(cmd + 5));  continue; }
+        if (k_strncmp(cmd, "touch ", 6) == 0) { cmd_touch(k_ltrim(cmd + 6)); continue; }
+        if (k_strncmp(cmd, "cat ", 4) == 0)   { cmd_cat(k_ltrim(cmd + 4));   continue; }
+        if (k_strncmp(cmd, "write ", 6) == 0) { cmd_write(cmd + 6);         continue; }
+        if (k_strncmp(cmd, "rm ", 3) == 0)    { cmd_rm(k_ltrim(cmd + 3));   continue; }
 
-        if (k_strcmp(cmd, "kill") == 0 ||
-            k_strcmp(cmd, "ls")   == 0 ||
-            k_strcmp(cmd, "cat")  == 0) {
+        if (k_strcmp(cmd, "kill") == 0) {
             vga_puts_color("  [TODO] This command is not yet implemented.\n",
                            VGA_YELLOW, VGA_BLACK);
-            vga_puts("  Implement it as part of your lecture assignment.\n");
             continue;
         }
 
@@ -438,7 +536,8 @@ void kernel_main(void) {
     kb_init();
     idt_init();
 
-    pmm_init(detect_memory_size());   /* must run before any create_process() call */
+    pmm_init(detect_memory_size());
+    fs_init();
 
     create_process("shell",     shell_entry, 2);
     create_process("process_a", process_a,   1);

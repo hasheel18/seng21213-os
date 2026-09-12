@@ -368,3 +368,60 @@ avoid the risk of modifying `linker.ld` and because the kernel image is
 comfortably smaller than 1 MB regardless of exact size. `pmmtest` verifies the
 *behaviour* (reuse of freed frames) rather than checking against fixed
 addresses, since those addresses are an artifact of a specific memory layout.
+
+---
+
+## Stage 4 — RAM Disk File System (Lecture 12)
+
+**Status:** Complete — tagged `v0.5-stage4`
+
+### What was implemented
+
+- **`kernel/ramdisk.h` / `kernel/ramdisk.c`** — a 1 MB contiguous byte array
+  acting as block storage (512-byte blocks, 2048 total), with `rd_read()` /
+  `rd_write()`. This lives in `.bss`.
+- **`linker.ld` / `kernel/kernel_entry.asm`** — `.bss` is marked `NOLOAD` so
+  the 1 MB ramdisk costs zero bytes in the actual kernel binary on disk (the
+  bootloader only reads 64 sectors / 32 KB). `kernel_entry.asm` zeroes `.bss`
+  manually at boot before any C code runs, since it's no longer guaranteed
+  zero by the loader. Verified: final `kernel.bin` is ~16 KB, comfortably
+  under the 32 KB load budget.
+- **`kernel/pmm.c`** — reserved region increased from 1 MB to 2 MB to
+  safely cover the kernel image plus the new ramdisk.
+- **`kernel/fs.h` / `kernel/fs.c`** — i-node-style file system on top of the
+  ramdisk: superblock (block 0), flat directory of 16 entries (block 1),
+  inode table of 48 inodes across 4 blocks, a free-block bitmap (block 6),
+  and data blocks from block 7 onward. All metadata is read/written directly
+  from the ramdisk on every operation (not cached in kernel globals),
+  matching how a real indexed allocation file system works (L12 1.2).
+  Implements `fs_init`, `fs_create`, `fs_open`, `fs_read`, `fs_write`
+  (append semantics), `fs_close`, `fs_unlink`, `fs_list`.
+- **Shell commands** — `ls`, `touch <name>`, `cat <name>`,
+  `write <name> <text>` (append), `rm <name>`.
+
+### How to test
+
+```bash
+make clean && make all
+make run
+```
+
+At `ksh>`:
+
+touch hello.txt
+ls
+write hello.txt Hello, SENG OS!
+cat hello.txt
+rm hello.txt
+ls
+
+Matches the milestone's required test sequence exactly.
+
+### Known simplifications
+
+- Max file size is 4 KB (8 direct block pointers × 512 bytes) — no indirect
+  block support, unlike the full i-node indirection described in L12 1.2.
+  Documented as a possible extension rather than implemented, given time
+  constraints.
+- Flat directory only (16 files max) — no subdirectories.
+- `fs_write` always appends; there's no seek/overwrite-in-place.
